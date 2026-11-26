@@ -24,6 +24,7 @@ from raydriver.epilog import EpilogSession
 
 from ....context import RayforgeContext
 from ....core.varset import (
+    BoolVar,
     ChoiceVar,
     HostnameVar,
     IntVar,
@@ -114,6 +115,7 @@ class EpilogZingDriver(SessionDriverBase):
         self._job_prefix = ""
         self._resolution = int(DEFAULT_RESOLUTION)
         self._frequency = DEFAULT_FREQUENCY
+        self._autofocus = False
 
     @property
     def machine_space_wcs_display_name(self) -> str:
@@ -213,6 +215,14 @@ class EpilogZingDriver(SessionDriverBase):
                     ),
                     default="",
                 ),
+                BoolVar(
+                    key="autofocus",
+                    label=_("Autofocus"),
+                    description=_(
+                        "Enable hardware autofocus at the start of each job"
+                    ),
+                    default=False,
+                ),
                 ChoiceVar(
                     key="resolution",
                     label=_("Resolution (DPI)"),
@@ -249,6 +259,7 @@ class EpilogZingDriver(SessionDriverBase):
         self._job_prefix = str(kwargs.get("job_prefix") or "")
         self._resolution = int(kwargs.get("resolution", DEFAULT_RESOLUTION))
         self._frequency = int(kwargs.get("frequency", DEFAULT_FREQUENCY))
+        self._autofocus = bool(kwargs.get("autofocus", False))
         self._session = EpilogSession(
             config={
                 "host": self._host,
@@ -408,6 +419,12 @@ class EpilogZingDriver(SessionDriverBase):
         ``\\x1b%1B`` (Enter HP-GL/2) escape sequence after ``\\x1b*p0X\\x1b*p0Y``,
         causing Epilog controllers to ignore or stall on vector commands.
         """
+        if self._autofocus:
+            payload = payload.replace(
+                b"@PJL ENTER LANGUAGE=PCL\r\n\x1b&y0A",
+                b"@PJL ENTER LANGUAGE=PCL\r\n\x1b&y1A",
+                1,
+            )
         if b"\x1b%1B" in payload:
             return payload
         marker = b"\x1b*p0X\x1b*p0Y"

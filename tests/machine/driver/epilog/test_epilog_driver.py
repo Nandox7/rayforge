@@ -150,7 +150,9 @@ class TestSetup:
         keys = list(EpilogZingDriver.get_setup_vars().keys())
         assert "queue" in keys
         assert "job_prefix" in keys
+        assert "autofocus" in keys
         assert keys.index("job_prefix") == keys.index("queue") + 1
+        assert keys.index("autofocus") == keys.index("job_prefix") + 1
         var = EpilogZingDriver.get_setup_vars().get("queue")
         assert var is not None
         assert var.default == "Laser"
@@ -159,6 +161,10 @@ class TestSetup:
         assert prefix_var is not None
         assert prefix_var.default == ""
         assert prefix_var.var_type is str
+        af_var = EpilogZingDriver.get_setup_vars().get("autofocus")
+        assert af_var is not None
+        assert af_var.default is False
+        assert af_var.var_type is bool
 
     def test_setup_accepts_empty_queue(
         self, lite_context, machine, setup_args, monkeypatch
@@ -230,6 +236,27 @@ class TestRun:
         )
         await driver.run(_encoded(payload), doc, None)
         session.upload.assert_awaited_once_with(payload, doc.name)
+
+    @pytest.mark.asyncio
+    async def test_uploads_payload_enables_autofocus_in_pjl_header(
+        self, lite_context, machine, setup_args, session, doc
+    ):
+        driver = EpilogZingDriver(lite_context, machine)
+        driver.setup(**{**setup_args, "autofocus": True})
+        driver._session = session
+        payload = (
+            b"\x1b%-12345X@PJL JOB NAME=Test\r\n"
+            b"\x1bE@PJL ENTER LANGUAGE=PCL\r\n"
+            b"\x1b&y0A\x1b&y0C\x1b&y0Z\x1b&l0U\x1b&l0Z"
+            b"\x1b&u500D\x1b*p0X\x1b*p0Y"
+            b"PU197,197;ZS100;YP050;PD394,197;PU;YP000;WF0;"
+            b"\x1bE\x1b%-12345X@PJL EOJ \r\n"
+        )
+        await driver.run(_encoded(payload), doc, None)
+        uploaded = session.upload.await_args.args[0]
+        assert b"@PJL ENTER LANGUAGE=PCL\r\n\x1b&y1A" in uploaded
+        # Dummy raster's manual focus offset remains 0.
+        assert b"\x1b&y0P\x1b&z1S\x1b&y0A" in uploaded
 
     @pytest.mark.asyncio
     async def test_uploads_payload_with_job_prefix(
