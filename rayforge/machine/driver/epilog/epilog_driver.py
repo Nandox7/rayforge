@@ -112,6 +112,8 @@ class EpilogZingDriver(SessionDriverBase):
         self._port = DEFAULT_PORT
         self._queue = DEFAULT_QUEUE
         self._job_prefix = ""
+        self._resolution = int(DEFAULT_RESOLUTION)
+        self._frequency = DEFAULT_FREQUENCY
 
     @property
     def machine_space_wcs_display_name(self) -> str:
@@ -245,6 +247,8 @@ class EpilogZingDriver(SessionDriverBase):
         self._port = int(port)
         self._queue = queue
         self._job_prefix = str(kwargs.get("job_prefix") or "")
+        self._resolution = int(kwargs.get("resolution", DEFAULT_RESOLUTION))
+        self._frequency = int(kwargs.get("frequency", DEFAULT_FREQUENCY))
         self._session = EpilogSession(
             config={
                 "host": self._host,
@@ -379,13 +383,14 @@ class EpilogZingDriver(SessionDriverBase):
         payload = encoded.driver_data.get("payload")
         if not payload:
             raise DriverSetupError(_("The job has no machine code to upload."))
+        payload_bytes = self._ensure_pcl_hpgl_preamble(bytes(payload))
         title = f"{self._job_prefix}{doc.name or 'Rayforge'}"
         session = self._require_session()
         try:
             if self._queue == "":
-                await self._upload_empty_queue_lpd(bytes(payload), title)
+                await self._upload_empty_queue_lpd(payload_bytes, title)
             else:
-                await session.upload(payload, title)
+                await session.upload(payload_bytes, title)
         except ConnectionError as exc:
             self._logger.warning(
                 f"Job terminated due to device error: {exc}. "
@@ -395,6 +400,38 @@ class EpilogZingDriver(SessionDriverBase):
         except Exception as exc:
             self._logger.error(f"Epilog upload failed: {exc}")
             raise
+
+    def _ensure_pcl_hpgl_preamble(self, payload: bytes) -> bytes:
+        """Ensure the PCL dummy raster and HP-GL/2 entry sequence are present.
+
+        ``raydriver``'s ``EpilogSpec`` omits the empty raster block and the
+        ``\\x1b%1B`` (Enter HP-GL/2) escape sequence after ``\\x1b*p0X\\x1b*p0Y``,
+        causing Epilog controllers to ignore or stall on vector commands.
+        """
+        if b"\x1b%1B" in payload:
+            return payload
+        marker = b"\x1b*p0X\x1b*p0Y"
+        idx = payload.find(marker)
+        if idx == -1:
+            return payload
+        split_at = idx + len(marker)
+        dpi = self._resolution
+        width, height = self._machine.axis_extents
+        height_px = int(height * dpi / 25.4)
+        width_px = int(width * dpi / 25.4)
+        parts: list[bytes] = []
+        if b"\x1b*rC" not in payload[:split_at]:
+            parts.append(
+                (
+                    f"\x1b*t{dpi}R\x1b*r0F\x1b&y0P\x1b&z1S\x1b&y0A"
+                    f"\x1b*r{height_px}T\x1b*r{width_px}S"
+                    "\x1b*b2M\x1b&y0O\x1b*r1A\x1b*rC"
+                ).encode("ascii")
+            )
+        parts.append(
+            f"\x1b%1BIN;WF0;XR{self._frequency:04d};YP000;".encode("ascii")
+        )
+        return payload[:split_at] + b"".join(parts) + payload[split_at:]
 
     async def _upload_empty_queue_lpd(
         self, payload: bytes, title: str

@@ -203,6 +203,35 @@ class TestRun:
         session.upload.assert_awaited_once_with(payload, doc.name)
 
     @pytest.mark.asyncio
+    async def test_uploads_payload_injects_dummy_raster_and_hpgl_entry(
+        self, driver, session, doc
+    ):
+        payload = (
+            b"\x1b%-12345X@PJL JOB NAME=Test\r\n"
+            b"\x1bE@PJL ENTER LANGUAGE=PCL\r\n"
+            b"\x1b&y0A\x1b&y0C\x1b&y0Z\x1b&l0U\x1b&l0Z"
+            b"\x1b&u500D\x1b*p0X\x1b*p0Y"
+            b"PU197,197;ZS100;YP050;PD394,197;PU;YP000;WF0;"
+            b"\x1bE\x1b%-12345X@PJL EOJ \r\n"
+        )
+        await driver.run(_encoded(payload), doc, None)
+        uploaded = session.upload.await_args.args[0]
+        assert b"\x1b*p0X\x1b*p0Y\x1b*t500R" in uploaded
+        assert b"\x1b*b2M\x1b&y0O\x1b*r1A\x1b*rC" in uploaded
+        assert b"\x1b*rC\x1b%1BIN;WF0;XR1000;YP000;PU197,197;" in uploaded
+
+    @pytest.mark.asyncio
+    async def test_uploads_payload_does_not_duplicate_hpgl_entry(
+        self, driver, session, doc
+    ):
+        payload = (
+            b"\x1b%-12345X@PJL JOB NAME=Test\r\n"
+            b"\x1b*p0X\x1b*p0Y\x1b*rC\x1b%1BIN;PU0,0;"
+        )
+        await driver.run(_encoded(payload), doc, None)
+        session.upload.assert_awaited_once_with(payload, doc.name)
+
+    @pytest.mark.asyncio
     async def test_uploads_payload_with_job_prefix(
         self, lite_context, machine, setup_args, session, doc
     ):
