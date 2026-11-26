@@ -147,12 +147,18 @@ class TestSetup:
         assert driver.get_setting_vars() == []
 
     def test_queue_defaults_to_laser(self):
-        keys = EpilogZingDriver.get_setup_vars().keys()
+        keys = list(EpilogZingDriver.get_setup_vars().keys())
         assert "queue" in keys
+        assert "job_prefix" in keys
+        assert keys.index("job_prefix") == keys.index("queue") + 1
         var = EpilogZingDriver.get_setup_vars().get("queue")
         assert var is not None
         assert var.default == "Laser"
         assert var.var_type is str
+        prefix_var = EpilogZingDriver.get_setup_vars().get("job_prefix")
+        assert prefix_var is not None
+        assert prefix_var.default == ""
+        assert prefix_var.var_type is str
 
     def test_setup_accepts_empty_queue(
         self, lite_context, machine, setup_args, monkeypatch
@@ -195,6 +201,17 @@ class TestRun:
         payload = b"\x1b%-12345X@PJL JOB" + bytes(16)
         await driver.run(_encoded(payload), doc, None)
         session.upload.assert_awaited_once_with(payload, doc.name)
+
+    @pytest.mark.asyncio
+    async def test_uploads_payload_with_job_prefix(
+        self, lite_context, machine, setup_args, session, doc
+    ):
+        driver = EpilogZingDriver(lite_context, machine)
+        driver.setup(**{**setup_args, "job_prefix": "visicut "})
+        driver._session = session
+        payload = b"\x1b%-12345X@PJL JOB" + bytes(16)
+        await driver.run(_encoded(payload), doc, None)
+        session.upload.assert_awaited_once_with(payload, f"visicut {doc.name}")
 
     @pytest.mark.asyncio
     async def test_missing_payload_fails(self, driver, doc):

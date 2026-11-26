@@ -111,6 +111,7 @@ class EpilogZingDriver(SessionDriverBase):
         self._host = ""
         self._port = DEFAULT_PORT
         self._queue = DEFAULT_QUEUE
+        self._job_prefix = ""
 
     @property
     def machine_space_wcs_display_name(self) -> str:
@@ -200,6 +201,16 @@ class EpilogZingDriver(SessionDriverBase):
                     ),
                     default=DEFAULT_QUEUE,
                 ),
+                Var(
+                    key="job_prefix",
+                    label=_("Job Prefix"),
+                    var_type=str,
+                    description=_(
+                        "Optional prefix prepended to the job name sent to "
+                        "the laser"
+                    ),
+                    default="",
+                ),
                 ChoiceVar(
                     key="resolution",
                     label=_("Resolution (DPI)"),
@@ -233,6 +244,7 @@ class EpilogZingDriver(SessionDriverBase):
         self._host = host
         self._port = int(port)
         self._queue = queue
+        self._job_prefix = str(kwargs.get("job_prefix") or "")
         self._session = EpilogSession(
             config={
                 "host": self._host,
@@ -367,7 +379,7 @@ class EpilogZingDriver(SessionDriverBase):
         payload = encoded.driver_data.get("payload")
         if not payload:
             raise DriverSetupError(_("The job has no machine code to upload."))
-        title = doc.name or "Rayforge"
+        title = f"{self._job_prefix}{doc.name or 'Rayforge'}"
         session = self._require_session()
         try:
             if self._queue == "":

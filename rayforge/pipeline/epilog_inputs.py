@@ -28,8 +28,9 @@ SUPPORTED_ORIGIN = "top_left"
 def build_epilog_context(machine: "Machine", doc: "Doc") -> dict:
     """Build the job context dict for `raydriver.encode.EpilogSpec`."""
     origin = machine.origin.value
+    prefix = str(machine.driver_args.get("job_prefix") or "")
     return {
-        "title": doc.name or "Rayforge",
+        "title": f"{prefix}{doc.name or 'Rayforge'}",
         "resolution": int(machine.driver_args.get("resolution", 500)),
         "frequency": int(machine.driver_args.get("frequency", 1000)),
         "bed_mm": [
