@@ -13,7 +13,9 @@ That encoder returns both the printable listing Rayforge shows and
 the exact byte stream this driver uploads.
 """
 
+import asyncio
 import logging
+import secrets
 from collections.abc import Awaitable, Callable
 from gettext import gettext as _
 from typing import TYPE_CHECKING, Any, cast
@@ -27,7 +29,7 @@ from ....core.varset import (
     IntVar,
     PortVar,
     SpeedVar,
-    TextAreaVar,
+    Var,
     VarSet,
 )
 from ....core.varset.hostnamevar import hostname_validator
@@ -56,6 +58,9 @@ DEFAULT_PORT = 515
 
 #: Print queue name Epilog's setup instructions use.
 DEFAULT_QUEUE = "Laser"
+
+#: Per-stage timeout (seconds) for the direct empty-queue LPD fallback.
+LPD_TIMEOUT = 30.0
 
 #: Supported raster and vector resolutions in dots per inch.
 RESOLUTIONS = ("100", "200", "250", "400", "500", "1000")
@@ -103,6 +108,9 @@ class EpilogZingDriver(SessionDriverBase):
     def __init__(self, context: RayforgeContext, machine: "Machine"):
         super().__init__(context, machine)
         self._machine_wcs = "MACHINE"
+        self._host = ""
+        self._port = DEFAULT_PORT
+        self._queue = DEFAULT_QUEUE
 
     @property
     def machine_space_wcs_display_name(self) -> str:
@@ -182,12 +190,13 @@ class EpilogZingDriver(SessionDriverBase):
                     ),
                     default=DEFAULT_SPEED_REFERENCE,
                 ),
-                TextAreaVar(
+                Var(
                     key="queue",
                     label=_("Print Queue"),
+                    var_type=str,
                     description=_(
                         "The print queue name the laser expects. "
-                        "Epilog's setup names it 'Laser'"
+                        "Leave empty for default, or use 'Laser'."
                     ),
                     default=DEFAULT_QUEUE,
                 ),
@@ -219,11 +228,16 @@ class EpilogZingDriver(SessionDriverBase):
         self._speed_reference = float(
             kwargs.get("speed_reference") or DEFAULT_SPEED_REFERENCE
         )
+        raw_queue = kwargs.get("queue")
+        queue = DEFAULT_QUEUE if raw_queue is None else str(raw_queue)
+        self._host = host
+        self._port = int(port)
+        self._queue = queue
         self._session = EpilogSession(
             config={
-                "host": host,
-                "port": int(port),
-                "queue": str(kwargs.get("queue") or DEFAULT_QUEUE),
+                "host": self._host,
+                "port": self._port,
+                "queue": self._queue,
             },
             event_callback=self._on_session_event,
         )
@@ -354,8 +368,12 @@ class EpilogZingDriver(SessionDriverBase):
         if not payload:
             raise DriverSetupError(_("The job has no machine code to upload."))
         title = doc.name or "Rayforge"
+        session = self._require_session()
         try:
-            await self._require_session().upload(payload, title)
+            if self._queue == "":
+                await self._upload_empty_queue_lpd(bytes(payload), title)
+            else:
+                await session.upload(payload, title)
         except ConnectionError as exc:
             self._logger.warning(
                 f"Job terminated due to device error: {exc}. "
@@ -365,6 +383,80 @@ class EpilogZingDriver(SessionDriverBase):
         except Exception as exc:
             self._logger.error(f"Epilog upload failed: {exc}")
             raise
+
+    async def _upload_empty_queue_lpd(
+        self, payload: bytes, title: str
+    ) -> None:
+        """Send an LPD job with an empty queue name (``\\x02\\n``).
+
+        ``raydriver.epilog.EpilogSession`` substitutes ``"Laser"`` when
+        configured with ``queue=""``. This fallback speaks the same
+        LPD exchange directly so an empty queue sends ``b"\\x02\\n"``.
+        """
+        import re
+
+        safe_title = re.sub(r"[^A-Za-z0-9 ._-]", "_", title)[:64].strip()
+        if not safe_title:
+            safe_title = "Rayforge"
+        suffix = f"A{secrets.randbelow(1000):03d}rayforge"
+        control_name = f"cf{suffix}"
+        data_name = f"df{suffix}"
+        control = (
+            f"Hrayforge\nPrayforge\nJ{safe_title}\n"
+            f"l{data_name}\nU{data_name}\nN{safe_title}\n"
+        ).encode("ascii")
+        stages = (
+            (b"\x02\n", "receive a job"),
+            (
+                f"\x02{len(control)} {control_name}\n".encode("ascii"),
+                "the control header",
+            ),
+            (control + b"\x00", "the control file"),
+            (
+                f"\x03{len(payload)} {data_name}\n".encode("ascii"),
+                "the data header",
+            ),
+            (payload, "the job data"),
+        )
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(self._host, self._port), LPD_TIMEOUT
+            )
+        except TimeoutError as exc:
+            raise TimeoutError("connecting to the Epilog timed out") from exc
+        try:
+            for data, stage in stages:
+                for offset in range(0, len(data), 65536):
+                    writer.write(data[offset : offset + 65536])
+                    await asyncio.wait_for(writer.drain(), LPD_TIMEOUT)
+                await self._read_lpd_ack(reader, stage)
+        finally:
+            writer.close()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), LPD_TIMEOUT)
+            except (OSError, TimeoutError):
+                pass
+
+    @staticmethod
+    async def _read_lpd_ack(
+        reader: asyncio.StreamReader, stage: str
+    ) -> None:
+        try:
+            response = await asyncio.wait_for(
+                reader.readexactly(1), LPD_TIMEOUT
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"Epilog timed out acknowledging {stage}"
+            ) from exc
+        except asyncio.IncompleteReadError as exc:
+            raise ConnectionError(
+                f"Epilog disconnected during {stage}"
+            ) from exc
+        if response != b"\x00":
+            raise ConnectionError(
+                f"Epilog rejected {stage} (code {response[0]})"
+            )
 
     async def cancel(self, emergency: bool = False) -> None:
         await self._require_session().cancel(emergency)

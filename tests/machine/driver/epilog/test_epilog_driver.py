@@ -152,6 +152,41 @@ class TestSetup:
         var = EpilogZingDriver.get_setup_vars().get("queue")
         assert var is not None
         assert var.default == "Laser"
+        assert var.var_type is str
+
+    def test_setup_accepts_empty_queue(
+        self, lite_context, machine, setup_args, monkeypatch
+    ):
+        captured = {}
+
+        class FakeSession:
+            def __init__(self, config, event_callback=None):
+                captured["config"] = config
+
+        monkeypatch.setattr(
+            "rayforge.machine.driver.epilog.epilog_driver.EpilogSession",
+            FakeSession,
+        )
+        driver = EpilogZingDriver(lite_context, machine)
+        driver.setup(**{**setup_args, "queue": ""})
+        assert captured["config"]["queue"] == ""
+
+    def test_setup_accepts_custom_queue(
+        self, lite_context, machine, setup_args, monkeypatch
+    ):
+        captured = {}
+
+        class FakeSession:
+            def __init__(self, config, event_callback=None):
+                captured["config"] = config
+
+        monkeypatch.setattr(
+            "rayforge.machine.driver.epilog.epilog_driver.EpilogSession",
+            FakeSession,
+        )
+        driver = EpilogZingDriver(lite_context, machine)
+        driver.setup(**{**setup_args, "queue": "raw"})
+        assert captured["config"]["queue"] == "raw"
 
 
 class TestRun:
@@ -176,6 +211,42 @@ class TestRun:
     async def test_cancel_delegates(self, driver, session):
         await driver.cancel()
         session.cancel.assert_awaited_once_with(False)
+
+    @pytest.mark.asyncio
+    async def test_empty_queue_sends_bare_lpd_receive_command(
+        self, lite_context, machine, setup_args, doc, session
+    ):
+        import asyncio
+
+        received: list[bytes] = []
+
+        async def handle(reader, writer):
+            while True:
+                data = await reader.read(4096)
+                if not data:
+                    break
+                received.append(data)
+                writer.write(b"\x00")
+                await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            d = EpilogZingDriver(lite_context, machine)
+            d.setup(
+                **{**setup_args, "host": "127.0.0.1", "port": port, "queue": ""}
+            )
+            d._session = session
+            payload = b"\x1b%-12345X@PJL JOB"
+            await d.run(_encoded(payload), doc, None)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        session.upload.assert_not_awaited()
+        assert received[0] == b"\x02\n"
+        assert received[-1] == payload
 
 
 class TestPanelOnlyOperations:
